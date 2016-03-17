@@ -76,6 +76,43 @@ typedef struct {
 } csp_route_queue_t;
 
 /**
+ * Check supported packet options
+ * @param interface pointer to incoming interface
+ * @param packet pointer to packet
+ * @return CSP_ERR_NONE is all options are supported, CSP_ERR_NOTSUP if not
+ */
+static int csp_route_check_options(csp_iface_t *interface, csp_packet_t *packet)
+{
+#ifndef CSP_USE_XTEA
+	/* Drop XTEA packets */
+	if (packet->id.flags & CSP_FXTEA) {
+		csp_log_error("Received XTEA encrypted packet, but CSP was compiled without XTEA support. Discarding packet");
+		interface->autherr++;
+		return CSP_ERR_NOTSUP;
+	}
+#endif
+
+#ifndef CSP_USE_HMAC
+	/* Drop HMAC packets */
+	if (packet->id.flags & CSP_FHMAC) {
+		csp_log_error("Received packet with HMAC, but CSP was compiled without HMAC support. Discarding packet");
+		interface->autherr++;
+		return CSP_ERR_NOTSUP;
+	}
+#endif
+
+#ifndef CSP_USE_RDP
+	/* Drop RDP packets */
+	if (packet->id.flags & CSP_FRDP) {
+		csp_log_error("Received RDP packet, but CSP was compiled without RDP support. Discarding packet");
+		interface->rx_error++;
+		return CSP_ERR_NOTSUP;
+	}
+#endif
+	return CSP_ERR_NONE;
+}
+
+/**
  * Helper function to decrypt, check auth and CRC32
  * @param security_opts either socket_opts or conn_opts
  * @param interface pointer to incoming interface
@@ -84,9 +121,9 @@ typedef struct {
  */
 static int csp_route_security_check(uint32_t security_opts, csp_iface_t * interface, csp_packet_t * packet) {
 
+#ifdef CSP_USE_XTEA
 	/* XTEA encrypted packet */
 	if (packet->id.flags & CSP_FXTEA) {
-#ifdef CSP_USE_XTEA
 		/* Read nonce */
 		uint32_t nonce;
 		memcpy(&nonce, &packet->data[packet->length - sizeof(nonce)], sizeof(nonce));
@@ -107,12 +144,8 @@ static int csp_route_security_check(uint32_t security_opts, csp_iface_t * interf
 		csp_log_warn("Received packet without XTEA encryption. Discarding packet\r\n");
 		interface->autherr++;
 		return CSP_ERR_XTEA;
-#else
-		csp_log_error("Received XTEA encrypted packet, but CSP was compiled without XTEA support. Discarding packet\r\n");
-		interface->autherr++;
-		return CSP_ERR_NOTSUP;
-#endif
 	}
+#endif
 
 	/* CRC32 verified packet */
 	if (packet->id.flags & CSP_FCRC32) {
@@ -135,9 +168,9 @@ static int csp_route_security_check(uint32_t security_opts, csp_iface_t * interf
 #endif
 	}
 
+#ifdef CSP_USE_HMAC
 	/* HMAC authenticated packet */
 	if (packet->id.flags & CSP_FHMAC) {
-#ifdef CSP_USE_HMAC
 		/* Verify HMAC */
 		if (csp_hmac_verify(packet) != 0) {
 			/* HMAC failed */
@@ -149,12 +182,19 @@ static int csp_route_security_check(uint32_t security_opts, csp_iface_t * interf
 		csp_log_warn("Received packet without HMAC. Discarding packet\r\n");
 		interface->autherr++;
 		return CSP_ERR_HMAC;
-#else
-		csp_log_error("Received packet with HMAC, but CSP was compiled without HMAC support. Discarding packet\r\n");
-		interface->autherr++;
-		return CSP_ERR_NOTSUP;
-#endif
 	}
+#endif
+
+#ifdef CSP_USE_RDP
+	/* RDP packet */
+	if (!(packet->id.flags & CSP_FRDP)) {
+		if (security_opts & CSP_SO_RDPREQ) {
+			csp_log_warn("Received packet without RDP header. Discarding packet");
+			interface->rx_error++;
+			return CSP_ERR_INVAL;
+		}
+	}
+#endif
 
 	return CSP_ERR_NONE;
 
@@ -294,6 +334,12 @@ CSP_DEFINE_TASK(csp_task_router) {
 
 		}
 
+		/* Discard packets with unsupported options */
+		if (csp_route_check_options(input.interface, packet) != CSP_ERR_NONE) {
+			csp_buffer_free(packet);
+			continue;
+		}
+
 		/* The message is to me, search for incoming socket */
 		socket = csp_port_get_socket(packet->id.dport);
 
@@ -363,25 +409,17 @@ CSP_DEFINE_TASK(csp_task_router) {
 
 		}
 
-		/* Pass packet to the right transport module */
-		if (packet->id.flags & CSP_FRDP) {
 #ifdef CSP_USE_RDP
+		/* Pass packet to RDP module */
+		if (packet->id.flags & CSP_FRDP) {
 			csp_rdp_new_packet(conn, packet);
-		} else if (conn->opts & CSP_SO_RDPREQ) {
-			csp_log_warn("Received packet without RDP header. Discarding packet\r\n");
-			input.interface->rx_error++;
-			csp_buffer_free(packet);
-#else
-			csp_log_error("Received RDP packet, but CSP was compiled without RDP support. Discarding packet\r\n");
-			input.interface->rx_error++;
-			csp_buffer_free(packet);
-#endif
-		} else {
-			/* Pass packet to UDP module */
-			csp_udp_new_packet(conn, packet);
+			continue;
 		}
-	}
+#endif
 
+		/* Pass packet to UDP module */
+		csp_udp_new_packet(conn, packet);
+	}
 }
 
 int csp_route_start_task(unsigned int task_stack_size, unsigned int priority) {
