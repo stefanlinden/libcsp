@@ -135,6 +135,10 @@ def configure(ctx):
     elif ctx.options.with_os == 'windows':
         ctx.env.append_unique('CFLAGS', ['-D_WIN32_WINNT=0x0600'])
     
+    # Add External Drivers
+    if ctx.options.with_drivers:
+        ctx.env.append_unique('INCLUDES_CSP', ctx.options.with_drivers)
+
     # Store OS as env variable
     ctx.env.append_unique('OS', ctx.options.with_os)
 
